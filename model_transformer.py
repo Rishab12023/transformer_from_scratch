@@ -216,6 +216,57 @@ class Transformer(nn.Module):
     def project(self, x):
         return self.projection_layer(x)
     
-def build_transformer():
-    # print("hello")
-    pass
+def build_transformer(
+        src_vocab_size: int,
+        tgt_vocab_size: int,
+        src_seq_len: int,
+        tgt_seq_len: int,
+        d_model: int = 512,
+        N: int = 6,
+        h: int = 8,
+        dropout: float = 0.1,
+        d_ff: int=2048
+)->Transformer:
+    
+    ## Input Token Embeddings
+    src_embed = InputEmbeddings(d_model, src_vocab_size) ## Since in machine translation task there could be different number of words in the vocab of src & tgt language
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
+    
+    ## Positional Encoding
+    src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
+    tgt_pos = PositionalEncoding(d_model, tgt_seq_len, dropout)
+
+    ## Creates the Encoder Block
+    encoder_blocks = []
+    for _ in range(N):
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(encoder_self_attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block)
+
+    ## Creates the Decoder Block
+    decoder_blocks = []
+    for _ in range(N):
+        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(decoder_block)
+
+    ## Create the Encoder and the Decoder
+    encoder = Encoder(nn.ModuleDict(encoder_blocks))
+    decoder = Decoder(nn.ModuleList(decoder_blocks))
+
+    ## Create the Projection Layer 
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+
+    ## Creates The TRANSFORMER
+    transfomer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer)
+
+
+    ## Initilize with Xavier Initialization
+    for p in transfomer.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+
+    return transfomer
