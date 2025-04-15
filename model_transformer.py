@@ -254,7 +254,7 @@ def build_transformer(
         decoder_blocks.append(decoder_block)
 
     ## Create the Encoder and the Decoder
-    encoder = Encoder(nn.ModuleDict(encoder_blocks))
+    encoder = Encoder(nn.ModuleList(encoder_blocks))
     decoder = Decoder(nn.ModuleList(decoder_blocks))
 
     ## Create the Projection Layer 
@@ -270,3 +270,4 @@ def build_transformer(
             nn.init.xavier_uniform_(p)
 
     return transfomer
+
