@@ -11,6 +11,8 @@ class InputEmbeddings(nn.Module):
         self.embedding = nn.Embedding(vocab_size, d_model)
 
     def forward(self,x):
+        # print("🚨 Embedding input dtype:", x.dtype)
+        # assert x.dtype == torch.long, f"Expected torch.long but got {x.dtype}"
         return self.embedding(x) * math.sqrt(self.d_model)
     
 
@@ -22,16 +24,15 @@ class PositionalEncoding(nn.Module):
         self.seq_len = seq_len
         self.dropout = nn.Dropout(dropout)
 
-        pos_encodings = torch.zeros(seq_len, d_model)
+        self.pe = torch.zeros(seq_len, d_model)
         position =  torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
         dinominator_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
-        pos_encodings[:,0::2] = torch.sin(position*dinominator_term)
-        pos_encodings[:,1::2] = torch.cos(position*dinominator_term)
+        self.pe[:,0::2] = torch.sin(position*dinominator_term)
+        self.pe[:,1::2] = torch.cos(position*dinominator_term)
 
-        pos_encodings = pos_encodings.unsqueeze(1) #--> this make it (1,seq_len, d_model)
-
-        self.register_buffer('pos_encodings', pos_encodings)
+        self.pe = self.pe.unsqueeze(0) #--> this make it (1,seq_len, d_model)
+        self.register_buffer('Positional_Encodings', self.pe)
 
     def forward(self, x):
         x = x + (self.pe[:, :x.shape[1], :]).requires_grad_(False)
@@ -39,12 +40,12 @@ class PositionalEncoding(nn.Module):
     
 class LayerNormalization(nn.Module):
 
-    def __init__(self, esp: float = 10**-6) -> None:
+    def __init__(self, d_model: int=512, esp: float = 10**-6) -> None:
         super().__init__()
 
         self.esp = esp
-        self.alpha = nn.Parameter(torch.ones(1))  ## Multiplied to scale the distribution
-        self.bias = nn.Parameter(torch.zeros(0))  ## Added to shift the distribution
+        self.alpha = nn.Parameter(torch.ones(d_model))  ## Multiplied to scale the distribution
+        self.bias = nn.Parameter(torch.zeros(d_model))  ## Added to shift the distribution
 
     def forward(self, x):
         mean = x.mean(dim= -1, keepdim=True)
@@ -71,6 +72,7 @@ class MultiHeadAttentionBlock(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.h = h
+        # print(f"here are the dimension of model {d_model} {h}")
         assert d_model %h == 0, "d_model is not divisible by h"
 
         self.d_k = d_model // h
@@ -87,7 +89,8 @@ class MultiHeadAttentionBlock(nn.Module):
 
         ## Key Dimension is (Batch, h, Seq_Len, d_k) ---> and when we multiply q*k then we get a matrix of seq * seq (Attention Score that each word give to every other word in the sequnece)
         ## Therefore we transpose the key and then multiply.
-        attention_score = (query @ key.transponse(-2, -1)) / math.sqrt(d_k)
+
+        attention_score = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
         if mask is not None:
             attention_score.masked_fill_(mask ==0, -1e9) ## Mask that will be used in case of Decoder Part.
         if dropout is not None:
@@ -109,7 +112,7 @@ class MultiHeadAttentionBlock(nn.Module):
         x, self.attention_scores = MultiHeadAttentionBlock.compute_attention_scr(query, key, value, mask, self.dropout) ## Since compute_attention_scr is a static method its called using Class Name
 
         ## Since we have (Batch, h, Seq_Len, d_k) --> (Batch, Seq_Len,h, d_k) --> (Batch, Seq_Len, d_model)
-        x = x.traspose(1,2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
+        x = x.transpose(1,2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
 
         # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
         return self.w_o(x)
@@ -137,7 +140,7 @@ class EncoderBlock(nn.Module):
 
     def forward(self, x, src_mask):
         x = self.residual_connection[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
-        x = self.residual_connection[1](x, self.feed_forward_block(x))
+        x = self.residual_connection[1](x, lambda x: self.feed_forward_block(x))
         return x
     
 
@@ -163,9 +166,9 @@ class DecoderBlock(nn.Module):
         self.residual_connection = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
-        x = self.residual_connection[0](x, lambda x: self.self_attention_block(x, x, x, x, tgt_mask))
+        x = self.residual_connection[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask))
         x = self.residual_connection[1](x, lambda x: self.cross_attention_block(x , encoder_output, encoder_output, src_mask))
-        x = self.residual_connection[2](x, self.feed_forward_block)
+        x = self.residual_connection[2](x, lambda x: self.feed_forward_block(x))
         return x
     
 class Decoder(nn.Module):
@@ -206,12 +209,12 @@ class Transformer(nn.Module):
     def encode(self, src, src_mask):
         src = self.src_embed(src)
         src = self.src_pos(src)
-        return self.encode(src, src_mask)
+        return self.encoder(src, src_mask)
     
     def decode(self, encoder_output, src_mask, tgt, tgt_mask):
         tgt = self.tgt_embed(tgt)
         tgt = self.tgt_pos(tgt)
-        return self.decode(tgt, encoder_output, src_mask, tgt_mask)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
     
     def project(self, x):
         return self.projection_layer(x)

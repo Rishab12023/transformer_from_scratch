@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
-
+from torch.utils.tensorboard import SummaryWriter
 from datasets import load_dataset
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -9,7 +9,14 @@ from tokenizers.trainers import WordLevelTrainer
 from tokenizers.pre_tokenizers import Whitespace
 
 from pathlib import Path
+from tqdm import tqdm
+import warnings
 
+from torch.utils.tensorboard import summary
+
+from dataset import BilingualDataset, causal_mask
+from model_transformer import build_transformer
+from config import get_config, get_weights_filepath 
 def get_all_sentences(dataset, language):
     for item in dataset:
         yield item['translation'][language]
@@ -39,3 +46,106 @@ def get_dataset(config):
     train_ds_size = int(0.9 * len(ds_raw))
     val_ds_size = len((ds_raw)) - train_ds_size
     train_ds_raw, val_ds_raw = random_split(ds_raw,[train_ds_size, val_ds_size])
+
+    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['language_src'], config['language_tgt'], config['seq_len'])
+    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['language_src'], config['language_tgt'], config['seq_len'])
+
+    max_len_src = 0
+    max_len_tgt = 0
+
+    for item in ds_raw:
+        src_ids = tokenizer_src.encode(item['translation'][config['language_src']]).ids
+        tgt_ids = tokenizer_tgt.encode(item['translation'][config['language_tgt']]).ids
+        max_len_src = max(max_len_src, len(src_ids))
+        max_len_tgt = max(max_len_tgt, len(tgt_ids))
+
+    print(f" Max lenght of Source Sentence: {max_len_src}")
+    print(f" Max lenght of Target Sentence: {max_len_tgt}")
+
+    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
+    val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
+
+    return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
+
+def get_model(config, vocab_src_len, vocab_tgt_len):
+    model = build_transformer(
+        src_vocab_size=vocab_src_len,
+        tgt_vocab_size=vocab_tgt_len,
+        src_seq_len=config['seq_len'],
+        tgt_seq_len=config['seq_len'],
+        d_model=config['d_model']
+    )
+    return model
+
+def train_model(config):
+    ## Device for the model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device Configured for Model : {device}")
+
+    Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
+
+    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_dataset(config)
+    model = get_model(config, tokenizer_src.get_vocab_size() , tokenizer_tgt.get_vocab_size())
+    ## Tensorboard
+    writer = SummaryWriter(config['experiment_name'])
+
+    ## Optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
+
+    initial_epoch = 0
+    global_step = 0
+    if config['preload']:
+        model_filename = get_weights_filepath(config, config['preload'])
+        print(f"Preloading Model {model_filename}")
+        state = torch.load(model_filename)
+        initial_epoch = state['epoch'] + 1
+        optimizer.load_state_dict(state['optimizer_state_dict'])
+        global_step = state['global_step']
+
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
+
+    for epoch in range(initial_epoch, config['num_epochs']):
+        model.train()
+        batch_iterator = tqdm(train_dataloader)
+        for batch in batch_iterator:
+            
+            encoder_input = batch['encoder_input'].to(dtype=torch.long, device=device)
+            decoder_input = batch['decoder_input'].to(dtype=torch.long, device=device)
+            encoder_mask = batch['encoder_mask'].to(device)
+            decoder_mask = batch['decoder_mask'].to(device)
+
+            ## Run the tensors through the transformers
+            encoder_output = model.encode(encoder_input, encoder_mask)  ## --Dimensions--> (Batch, Seq_Len, d_model)
+            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask) ## (Batch, Seq_len, d_model)
+            proj_output = model.project(decoder_output) ## (Batch, Seq_Len, Tgt_vocab_size)
+
+            label = batch['label'].to(device)
+            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
+            batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
+
+            ## Log the loss
+            writer.add_scalar("train loss", loss.item(), global_step)
+            writer.flush()
+
+            ##  backpropagation the loss
+            loss.backward()
+
+            ## Update the weights
+            optimizer.step()
+            optimizer.zero_grad()
+
+            global_step += 1
+
+        ## Save  the Model at the end of every month
+        model_filename = get_weights_filepath(config, f'{epoch:02d}')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'global_step': global_step
+        }, model_filename)
+
+if __name__ == "__main__":
+    warnings.filterwarnings('ignore')
+    config = get_config()
+    train_model(config)
